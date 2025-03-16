@@ -1,0 +1,202 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.1
+  name: roles.postgresql.rgeraskin.dev
+spec:
+  group: postgresql.rgeraskin.dev
+  names:
+    kind: Roles
+    listKind: RolesList
+    plural: roles
+    singular: roles
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Roles is the Schema for the roles API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: RolesSpec defines the desired state of Roles
+            properties:
+              database:
+                items:
+                  description: DatabaseConnection defines a database connection configuration
+                  properties:
+                    connection_string:
+                      type: string
+                  type: object
+                type: array
+              roles:
+                items:
+                  properties:
+                    create_database:
+                      description: can role create databases, default false
+                      type: boolean
+                    create_role:
+                      description: can role create other roles, default false
+                      type: boolean
+                    description:
+                      description: description, default empty
+                      type: string
+                    grants:
+                      description: list of grants for role, default empty
+                      items:
+                        description: Grant defines a permission grant for a role
+                        properties:
+                          columns:
+                            description: columns, default empty
+                            items:
+                              type: string
+                            type: array
+                          database:
+                            description: database, required
+                            type: string
+                          object_type:
+                            description: object_type, required
+                            type: string
+                          objects:
+                            description: objects, default empty
+                            items:
+                              type: string
+                            type: array
+                          privileges:
+                            description: privileges, required
+                            items:
+                              type: string
+                            type: array
+                          schema:
+                            description: schema, default empty
+                            type: string
+                          table:
+                            description: table, default empty
+                            type: string
+                          with_grant_option:
+                            description: with_grant_option, default false
+                            type: boolean
+                        type: object
+                      type: array
+                    login:
+                      description: can role login or can not, default true
+                      type: boolean
+                    member_of:
+                      description: list of roles where user is member, default empty
+                      items:
+                        type: string
+                      type: array
+                    name:
+                      description: required
+                      type: string
+                    password_enabled:
+                      description: should password be generated for user, default
+                        false
+                      type: boolean
+                    replication:
+                      description: can role initiate replication, default false
+                      type: boolean
+                    users:
+                      description: list of users that are members of role, default
+                        empty
+                      items:
+                        type: string
+                      type: array
+                  required:
+                  - create_database
+                  - create_role
+                  - description
+                  - grants
+                  - login
+                  - member_of
+                  - name
+                  - password_enabled
+                  - replication
+                  - users
+                  type: object
+                type: array
+            type: object
+          status:
+            description: RolesStatus defines the observed state of Roles
+            properties:
+              conditions:
+                description: Conditions store the status conditions of the Roles instances
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

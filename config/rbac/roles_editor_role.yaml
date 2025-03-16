@@ -1,0 +1,27 @@
+# permissions for end users to edit roles.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: psql-roles-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: roles-editor-role
+rules:
+- apiGroups:
+  - postgresql.rgeraskin.dev
+  resources:
+  - roles
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - postgresql.rgeraskin.dev
+  resources:
+  - roles/status
+  verbs:
+  - get

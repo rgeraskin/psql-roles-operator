@@ -1,0 +1,9 @@
+apiVersion: postgresql.rgeraskin.dev/v1alpha1
+kind: Roles
+metadata:
+  labels:
+    app.kubernetes.io/name: psql-roles-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: roles-sample
+spec:
+  # TODO(user): Add fields here
