@@ -23,6 +23,8 @@ import (
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
+
+	"go.uber.org/zap/zapcore"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -59,21 +61,43 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
-	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
-		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
-	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(
+		&metricsAddr,
+		"metrics-bind-address",
+		"0",
+		"The address the metrics endpoint binds to. "+
+			"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.",
+	)
+	flag.StringVar(
+		&probeAddr,
+		"health-probe-bind-address",
+		":8081",
+		"The address the probe endpoint binds to.",
+	)
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
-	flag.BoolVar(&secureMetrics, "metrics-secure", true,
-		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
+	flag.BoolVar(
+		&secureMetrics,
+		"metrics-secure",
+		true,
+		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.",
+	)
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
-	opts := zap.Options{
-		Development: true,
-	}
+
+	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	if opts.Development {
+		// add colors
+		opts.EncoderConfigOptions = []zap.EncoderConfigOption{
+			func(config *zapcore.EncoderConfig) {
+				config.EncodeLevel = zapcore.CapitalColorLevelEncoder
+			},
+		}
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
@@ -144,11 +168,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controller.RolesReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("roles-controller"),
-	}).SetupWithManager(mgr); err != nil {
+	reconciler := controller.NewRolesReconciler(
+		mgr.GetClient(),
+		mgr.GetScheme(),
+		mgr.GetEventRecorderFor("roles-controller"),
+	)
+	if err = reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Roles")
 		os.Exit(1)
 	}

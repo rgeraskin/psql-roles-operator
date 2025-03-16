@@ -1,0 +1,32 @@
+apiVersion: postgresql.rgeraskin.dev/v1alpha1
+kind: Roles
+metadata:
+  name: test-cr
+spec:
+  database:
+    connection_string: postgres://postgres:password@localhost:15432/postgres?sslmode=disable
+  roles:
+    - name: test_role
+      login: true
+      grants:
+        - schema: public
+          object_type: table
+          objects:
+            - test_debezium
+          privileges:
+            - insert
+            - select
+      # create_database: true
+      # create_role: true
+      # description: test role
+      # grants:
+      #   []
+      #   # - "CREATE DATABASE"
+      #   # - "CREATE ROLE"
+      #   # - "CREATE TABLE"
+      # member_of:
+      #   - test-role
+      # password_enabled: true
+      # replication: false
+      # users:
+      #   - test-user

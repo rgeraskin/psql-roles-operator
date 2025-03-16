@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"go.uber.org/zap/zapcore"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,35 +29,88 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	postgresv1alpha1 "github.com/rgeraskin/psql-roles-operator/api/v1alpha1"
+	"github.com/go-logr/logr"
+	postgresqlv1alpha1 "github.com/rgeraskin/psql-roles-operator/api/v1alpha1"
+	"github.com/rgeraskin/psql-roles-operator/internal/postgres"
 )
 
-const rolesFinalizer = "postgres.rgeraskin.dev/finalizer"
+const rolesFinalizer = "postgresql.rgeraskin.dev/finalizer"
 
 // Definitions to manage status conditions
-const (
-	// typeAvailableRoles represents the status of the Deployment reconciliation
-	typeAvailableRoles = "Available"
-	// typeDegradedRoles represents the status used when the custom resource is deleted and the finalizer operations are yet to occur.
-	typeDegradedRoles = "Degraded"
-)
+// const (
+// )
 
 // RolesReconciler reconciles a Roles object
 type RolesReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
+	logger   logr.Logger
+}
+
+func NewRolesReconciler(
+	client client.Client,
+	scheme *runtime.Scheme,
+	recorder record.EventRecorder,
+) *RolesReconciler {
+	opts := zap.Options{}
+	opts.Development = true
+	opts.EncoderConfigOptions = []zap.EncoderConfigOption{
+		func(config *zapcore.EncoderConfig) {
+			config.EncodeLevel = zapcore.CapitalColorLevelEncoder
+		},
+	}
+	logger := zap.New(zap.UseFlagOptions(&opts)).WithName("reconcile")
+
+	return &RolesReconciler{
+		Client:   client,
+		Scheme:   scheme,
+		Recorder: recorder,
+		logger:   logger,
+	}
+}
+
+func (r *RolesReconciler) updateConditions(
+	ctx *context.Context,
+	req *ctrl.Request,
+	roles *postgresqlv1alpha1.Roles,
+	condition *metav1.Condition,
+) error {
+	r.logger.V(1).
+		Info(
+			"Update Roles Conditions",
+			"type", condition.Type,
+			"status", condition.Status,
+			"reason", condition.Reason,
+			"message", condition.Message,
+		)
+	meta.SetStatusCondition(&roles.Status.Conditions, *condition)
+
+	if err := r.Status().Update(*ctx, roles); err != nil {
+		return fmt.Errorf("failed to update Roles Conditions: %w", err)
+	}
+
+	// Let's re-fetch the Roles Custom Resource after updating the status
+	// so that we have the latest state of the resource on the cluster and we will avoid
+	// raising the error "the object has been modified, please apply
+	// your changes to the latest version and try again" which would re-trigger the reconciliation
+	// if we try to update it again in the following operations
+	if err := r.Get(*ctx, req.NamespacedName, roles); err != nil {
+		return fmt.Errorf("failed to re-fetch roles: %w", err)
+	}
+
+	return nil
 }
 
 // The following markers are used to generate the rules permissions (RBAC) on config/rbac using controller-gen
 // when the command <make manifests> is executed.
 // To know more about markers see: https://book.kubebuilder.io/reference/markers.html
 
-// +kubebuilder:rbac:groups=postgres.rgeraskin.dev,resources=roles,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=postgres.rgeraskin.dev,resources=roles/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=postgres.rgeraskin.dev,resources=roles/finalizers,verbs=update
+// +kubebuilder:rbac:groups=postgresql.rgeraskin.dev,resources=roles,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=postgresql.rgeraskin.dev,resources=roles/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=postgresql.rgeraskin.dev,resources=roles/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -71,228 +125,349 @@ type RolesReconciler struct {
 // - About Controllers: https://kubernetes.io/docs/concepts/architecture/controller/
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.0/pkg/reconcile
 func (r *RolesReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
+	// r.logger = log.FromContext(ctx).WithName("reconcile").WithValues()
 
 	// Fetch the Roles instance
 	// The purpose is check if the Custom Resource for the Kind Roles
 	// is applied on the cluster if not we return nil to stop the reconciliation
-	roles := &postgresv1alpha1.Roles{}
+	r.logger.V(1).Info("Fetch the Roles instance")
+	roles := &postgresqlv1alpha1.Roles{}
 	err := r.Get(ctx, req.NamespacedName, roles)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			// If the custom resource is not found then it usually means that it was deleted or not created
 			// In this way, we will stop the reconciliation
-			log.Info("roles resource not found. Ignoring since object must be deleted")
+			r.logger.Info("roles resource not found. Ignoring since object must be deleted")
 			return ctrl.Result{}, nil
 		}
 		// Error reading the object - requeue the request.
-		log.Error(err, "Failed to get roles")
+		r.logger.Error(err, "Failed to get Roles")
 		return ctrl.Result{}, err
 	}
 
-	// Let's just set the status as Unknown when no status is available
-	if len(roles.Status.Conditions) == 0 {
-		meta.SetStatusCondition(&roles.Status.Conditions, metav1.Condition{Type: typeAvailableRoles, Status: metav1.ConditionUnknown, Reason: "Reconciling", Message: "Starting reconciliation"})
-		if err = r.Status().Update(ctx, roles); err != nil {
-			log.Error(err, "Failed to update Roles status")
-			return ctrl.Result{}, err
-		}
+	ConditionReady := metav1.Condition{
+		Type: "Ready",
+	}
+	defer r.updateConditions(
+		&ctx,
+		&req,
+		roles,
+		&ConditionReady,
+	)
 
-		// Let's re-fetch the memcached Custom Resource after updating the status
-		// so that we have the latest state of the resource on the cluster and we will avoid
-		// raising the error "the object has been modified, please apply
-		// your changes to the latest version and try again" which would re-trigger the reconciliation
-		// if we try to update it again in the following operations
-		if err := r.Get(ctx, req.NamespacedName, roles); err != nil {
-			log.Error(err, "Failed to re-fetch roles")
-			return ctrl.Result{}, err
-		}
+	// Let's just set the status as Unknown when no status is available
+	r.logger.V(1).Info("Check if the status is available")
+	ConditionReady.Reason = "Initializing"
+	if len(roles.Status.Conditions) == 0 {
+		r.logger.V(1).Info("Status is empty, set it to Unknown")
+		ConditionReady.Status = metav1.ConditionUnknown
+		ConditionReady.Message = "No conditions are available"
 	}
 
 	// Let's add a finalizer. Then, we can define some operations which should
 	// occur before the custom resource is deleted.
 	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers
+	r.logger.V(1).Info("Check if the custom resource has a finalizer")
 	if !controllerutil.ContainsFinalizer(roles, rolesFinalizer) {
-		log.Info("Adding Finalizer for Roles")
+		r.logger.Info("Adding Finalizer for Roles")
 		if ok := controllerutil.AddFinalizer(roles, rolesFinalizer); !ok {
-			log.Error(err, "Failed to add finalizer into the custom resource")
+			r.logger.Error(nil, "Failed to add finalizer into the custom resource")
+			ConditionReady.Status = metav1.ConditionFalse
+			ConditionReady.Message = "Failed to add finalizer into the custom resource"
+			// we don't have errors, so we don't need to requeue
 			return ctrl.Result{Requeue: true}, nil
 		}
 
 		if err = r.Update(ctx, roles); err != nil {
-			log.Error(err, "Failed to update custom resource to add finalizer")
+			r.logger.Error(err, "Failed to update custom resource to add finalizer")
+			ConditionReady.Status = metav1.ConditionFalse
+			ConditionReady.Message = "Failed to update custom resource to add finalizer"
 			return ctrl.Result{}, err
 		}
 	}
 
-	// Check if the Memcached instance is marked to be deleted, which is
+	// Create a new PostgreSQL client
+	r.logger.V(1).Info("Create a new PostgreSQL client")
+	pgClient, err := postgres.NewClient(ctx, roles.Spec.Database.ConnectionString)
+	if err != nil {
+		r.logger.Error(err, "Failed to create PostgreSQL client")
+		ConditionReady.Status = metav1.ConditionFalse
+		ConditionReady.Message = "Failed to create PostgreSQL client"
+		return ctrl.Result{}, err
+	}
+	defer pgClient.Close()
+
+	// Check if the Roles instance is marked to be deleted, which is
 	// indicated by the deletion timestamp being set.
+	r.logger.V(1).Info("Check if the Roles instance is marked to be deleted")
 	isRolesMarkedToBeDeleted := roles.GetDeletionTimestamp() != nil
 	if isRolesMarkedToBeDeleted {
 		if controllerutil.ContainsFinalizer(roles, rolesFinalizer) {
-			log.Info("Performing Finalizer Operations for Roles before delete CR")
+			r.logger.Info("Performing Finalizer Operations for Roles before delete CR")
 
-			// Let's add here a status "Downgrade" to reflect that this resource began its process to be terminated.
-			meta.SetStatusCondition(&roles.Status.Conditions, metav1.Condition{Type: typeDegradedRoles,
-				Status: metav1.ConditionUnknown, Reason: "Finalizing",
-				Message: fmt.Sprintf("Performing finalizer operations for the custom resource: %s ", roles.Name)})
+			// Let's set here a status to reflect that this resource began its process to be terminated.
+			ConditionReady.Status = metav1.ConditionFalse
+			ConditionReady.Reason = "Finalizing"
+			ConditionReady.Message = "Performing finalizer operations"
 
-			if err := r.Status().Update(ctx, roles); err != nil {
-				log.Error(err, "Failed to update Roles status")
-				return ctrl.Result{}, err
+			// Delete all roles from PostgreSQL
+			for _, role := range roles.Spec.Roles {
+				if err := pgClient.DropRole(role.Name); err != nil {
+					r.logger.Error(err, "Failed to drop role", "role", role.Name)
+					ConditionReady.Message = "Failed to drop role"
+					return ctrl.Result{}, err
+				}
 			}
 
-			// Perform all operations required before removing the finalizer and allow
-			// the Kubernetes API to remove the custom resource.
-			r.doFinalizerOperationsForRoles(roles)
-
-			// TODO(user): If you add operations to the doFinalizerOperationsForMemcached method
-			// then you need to ensure that all worked fine before deleting and updating the Downgrade status
-			// otherwise, you should requeue here.
-
-			// Re-fetch the memcached Custom Resource before updating the status
-			// so that we have the latest state of the resource on the cluster and we will avoid
-			// raising the error "the object has been modified, please apply
-			// your changes to the latest version and try again" which would re-trigger the reconciliation
-			if err := r.Get(ctx, req.NamespacedName, roles); err != nil {
-				log.Error(err, "Failed to re-fetch roles")
-				return ctrl.Result{}, err
-			}
-
-			meta.SetStatusCondition(&roles.Status.Conditions, metav1.Condition{Type: typeDegradedRoles,
-				Status: metav1.ConditionTrue, Reason: "Finalizing",
-				Message: fmt.Sprintf("Finalizer operations for custom resource %s name were successfully accomplished", roles.Name)})
-
-			if err := r.Status().Update(ctx, roles); err != nil {
-				log.Error(err, "Failed to update Roles status")
-				return ctrl.Result{}, err
-			}
-
-			log.Info("Removing Finalizer for Roles after successfully perform the operations")
+			r.logger.Info("Removing Finalizer for Roles after successfully perform the operations")
 			if ok := controllerutil.RemoveFinalizer(roles, rolesFinalizer); !ok {
-				log.Error(err, "Failed to remove finalizer for Roles")
+				r.logger.Error(nil, "Failed to remove finalizer for Roles")
+				ConditionReady.Message = "Failed to remove finalizer from the custom resource"
+				// we don't have errors, so we don't need to requeue
 				return ctrl.Result{Requeue: true}, nil
 			}
 
 			if err := r.Update(ctx, roles); err != nil {
-				log.Error(err, "Failed to remove finalizer for Roles")
+				r.logger.Error(err, "Failed to remove finalizer for Roles")
+				ConditionReady.Message = "Failed to update custom resource to remove finalizer"
 				return ctrl.Result{}, err
 			}
+
+			ConditionReady.Status = metav1.ConditionTrue
+			ConditionReady.Message = "Finalizer operations successfully done"
 		}
 		return ctrl.Result{}, nil
 	}
 
-	// Check if the deployment already exists, if not create a new one
-	// found := &appsv1.Deployment{}
-	// err = r.Get(ctx, types.NamespacedName{Name: memcached.Name, Namespace: memcached.Namespace}, found)
-	// if err != nil && apierrors.IsNotFound(err) {
-	// 	// Define a new deployment
-	// 	dep, err := r.deploymentForMemcached(memcached)
-	// 	if err != nil {
-	// 		log.Error(err, "Failed to define new Deployment resource for Memcached")
-
-	// 		// The following implementation will update the status
-	// 		meta.SetStatusCondition(&memcached.Status.Conditions, metav1.Condition{Type: typeAvailableMemcached,
-	// 			Status: metav1.ConditionFalse, Reason: "Reconciling",
-	// 			Message: fmt.Sprintf("Failed to create Deployment for the custom resource (%s): (%s)", memcached.Name, err)})
-
-	// 		if err := r.Status().Update(ctx, memcached); err != nil {
-	// 			log.Error(err, "Failed to update Memcached status")
-	// 			return ctrl.Result{}, err
-	// 		}
-
-	// 		return ctrl.Result{}, err
-	// 	}
-
-	// 	log.Info("Creating a new Deployment",
-	// 		"Deployment.Namespace", dep.Namespace, "Deployment.Name", dep.Name)
-	// 	if err = r.Create(ctx, dep); err != nil {
-	// 		log.Error(err, "Failed to create new Deployment",
-	// 			"Deployment.Namespace", dep.Namespace, "Deployment.Name", dep.Name)
-	// 		return ctrl.Result{}, err
-	// 	}
-
-	// 	// Deployment created successfully
-	// 	// We will requeue the reconciliation so that we can ensure the state
-	// 	// and move forward for the next operations
-	// 	return ctrl.Result{RequeueAfter: time.Minute}, nil
-	// } else if err != nil {
-	// 	log.Error(err, "Failed to get Deployment")
-	// 	// Let's return the error for the reconciliation be re-trigged again
-	// 	return ctrl.Result{}, err
-	// }
-
-	// The CRD API defines that the Memcached type have a MemcachedSpec.Size field
-	// to set the quantity of Deployment instances to the desired state on the cluster.
-	// Therefore, the following code will ensure the Deployment size is the same as defined
-	// via the Size spec of the Custom Resource which we are reconciling.
-	// size := memcached.Spec.Size
-	// if *found.Spec.Replicas != size {
-	// 	found.Spec.Replicas = &size
-	// 	if err = r.Update(ctx, found); err != nil {
-	// 		log.Error(err, "Failed to update Deployment",
-	// 			"Deployment.Namespace", found.Namespace, "Deployment.Name", found.Name)
-
-	// 		// Re-fetch the memcached Custom Resource before updating the status
-	// 		// so that we have the latest state of the resource on the cluster and we will avoid
-	// 		// raising the error "the object has been modified, please apply
-	// 		// your changes to the latest version and try again" which would re-trigger the reconciliation
-	// 		if err := r.Get(ctx, req.NamespacedName, memcached); err != nil {
-	// 			log.Error(err, "Failed to re-fetch memcached")
-	// 			return ctrl.Result{}, err
-	// 		}
-
-	// 		// The following implementation will update the status
-	// 		meta.SetStatusCondition(&memcached.Status.Conditions, metav1.Condition{Type: typeAvailableMemcached,
-	// 			Status: metav1.ConditionFalse, Reason: "Resizing",
-	// 			Message: fmt.Sprintf("Failed to update the size for the custom resource (%s): (%s)", memcached.Name, err)})
-
-	// 		if err := r.Status().Update(ctx, memcached); err != nil {
-	// 			log.Error(err, "Failed to update Memcached status")
-	// 			return ctrl.Result{}, err
-	// 		}
-
-	// 		return ctrl.Result{}, err
-	// 	}
-
-	// 	// Now, that we update the size we want to requeue the reconciliation
-	// 	// so that we can ensure that we have the latest state of the resource before
-	// 	// update. Also, it will help ensure the desired state on the cluster
-	// 	return ctrl.Result{Requeue: true}, nil
-	// }
-
-	// The following implementation will update the status
-	meta.SetStatusCondition(&roles.Status.Conditions, metav1.Condition{Type: typeAvailableRoles,
-		Status: metav1.ConditionTrue, Reason: "Reconciling",
-		Message: fmt.Sprintf("Roles for custom resource (%s) created successfully", roles.Name)})
-
-	if err := r.Status().Update(ctx, roles); err != nil {
-		log.Error(err, "Failed to update Roles status")
+	// Get the previous version of the resource
+	r.logger.V(1).Info("Get the previous version of the resource")
+	previousRoles := &postgresqlv1alpha1.Roles{}
+	err = r.Get(ctx, req.NamespacedName, previousRoles)
+	if err != nil && !apierrors.IsNotFound(err) {
+		r.logger.Error(err, "Failed to get previous version of roles")
+		ConditionReady.Status = metav1.ConditionFalse
+		ConditionReady.Message = "Failed to get previous version of roles"
 		return ctrl.Result{}, err
 	}
 
+	// Create maps of role names for comparison
+	r.logger.V(1).Info("Create maps of role names for comparison")
+	currentRoles := make(map[string]bool)
+	previousRolesMap := make(map[string]bool)
+
+	for _, role := range roles.Spec.Roles {
+		currentRoles[role.Name] = true
+	}
+
+	for _, role := range previousRoles.Spec.Roles {
+		previousRolesMap[role.Name] = true
+	}
+
+	// Find roles that were removed
+	r.logger.V(1).Info("Find roles that were removed")
+	rolesToDrop := []string{}
+	for roleName := range previousRolesMap {
+		if !currentRoles[roleName] {
+			r.logger.Info("Role removed from spec", "role", roleName)
+			rolesToDrop = append(rolesToDrop, roleName)
+		}
+	}
+
+	// Reconcile roles
+	r.logger.V(1).Info("Reconcile roles")
+	ConditionReady.Reason = "Reconciling"
+	if len(rolesToDrop) > 0 {
+		r.logger.Info("Dropping removed roles", "roles", rolesToDrop)
+		ConditionReady.Status = metav1.ConditionFalse
+		for _, roleName := range rolesToDrop {
+			if err := pgClient.DropRole(roleName); err != nil {
+				r.logger.Error(err, "Failed to drop removed role", "role", roleName)
+				ConditionReady.Message = fmt.Sprintf("Failed to drop removed role: %s", roleName)
+				return ctrl.Result{}, err
+			}
+		}
+
+		ConditionReady.Status = metav1.ConditionTrue
+		ConditionReady.Message = "Successfully dropped removed roles"
+	}
+
+	ConditionReady.Status = metav1.ConditionFalse
+	ConditionReady.Message = "Reconcile roles"
+	err = nil
+	for _, role := range roles.Spec.Roles {
+		// Create role
+		r.logger.V(1).Info(
+			"Create or update role",
+			"roleName", role.Name,
+			"roleDescription", role.Description,
+			"roleLogin", role.Login,
+			"roleReplication", role.Replication,
+			"roleMemberOf", role.MemberOf,
+			"roleUsers", role.Users,
+			"roleGrants", role.Grants,
+		)
+
+		err = pgClient.CreateRole(&role)
+
+		if err != nil && err.Error() != fmt.Sprintf("pq: role \"%s\" already exists", role.Name) {
+			r.logger.Error(err, "Failed to create role", "roleName", role.Name)
+			ConditionReady.Message = fmt.Sprintf("Failed to create role: %s", role.Name)
+			break
+		}
+
+		// If the role already exists, we should update the role
+		if err != nil && err.Error() == fmt.Sprintf("pq: role \"%s\" already exists", role.Name) {
+			r.logger.Info("Role already exists, should update it", "roleName", role.Name)
+
+			// description
+			r.logger.V(1).
+				Info("Set role description", "roleName", role.Name, "description", role.Description)
+			err = pgClient.SetRoleDescription(role.Name, role.Description)
+			if err != nil {
+				r.logger.Error(
+					err,
+					"Failed to set role description",
+					"roleName",
+					role.Name,
+					"description",
+					role.Description,
+				)
+				ConditionReady.Message = fmt.Sprintf(
+					"Failed to reconcile role description: %s",
+					role.Name,
+				)
+				break
+			}
+
+			// login
+			r.logger.V(1).Info("Set role login", "roleName", role.Name, "login", role.Login)
+			err = pgClient.SetRoleLogin(role.Name, role.Login)
+			if err != nil {
+				r.logger.Error(
+					err,
+					"Failed to set role login",
+					"roleName",
+					role.Name,
+					"login",
+					role.Login,
+				)
+				ConditionReady.Message = fmt.Sprintf(
+					"Failed to reconcile role login: %s",
+					role.Name,
+				)
+				break
+			}
+
+			// replication
+			r.logger.V(1).
+				Info("Set role replication", "roleName", role.Name, "replication", role.Replication)
+			err = pgClient.SetRoleReplication(role.Name, role.Replication)
+			if err != nil {
+				r.logger.Error(
+					err,
+					"Failed to set role replication",
+					"roleName",
+					role.Name,
+					"replication",
+					role.Replication,
+				)
+				ConditionReady.Message = fmt.Sprintf(
+					"Failed to reconcile role replication: %s",
+					role.Name,
+				)
+				break
+			}
+
+			// memberOf
+			r.logger.V(1).
+				Info("Set role member of", "roleName", role.Name, "memberOf", role.MemberOf)
+			err = pgClient.SetRoleMemberOf(role.Name, role.MemberOf)
+			if err != nil {
+				r.logger.Error(
+					err,
+					"Failed to set role member of",
+					"roleName",
+					role.Name,
+					"memberOf",
+					role.MemberOf,
+				)
+				ConditionReady.Message = fmt.Sprintf(
+					"Failed to reconcile role member_of: %s",
+					role.Name,
+				)
+				break
+			}
+
+			// users
+			r.logger.V(1).Info("Set role users", "roleName", role.Name, "users", role.Users)
+			err = pgClient.SetRoleUsers(role.Name, role.Users)
+			if err != nil {
+				r.logger.Error(
+					err,
+					"Failed to set role users",
+					"roleName",
+					role.Name,
+					"users",
+					role.Users,
+				)
+				ConditionReady.Message = fmt.Sprintf(
+					"Failed to reconcile role users: %s",
+					role.Name,
+				)
+				break
+			}
+
+			// grants
+			r.logger.V(1).Info("Set role grants", "roleName", role.Name, "grants", role.Grants)
+			err = pgClient.SetRoleGrants(role.Name, role.Grants)
+			if err != nil {
+				r.logger.Error(
+					err,
+					"Failed to set role grants",
+					"roleName",
+					role.Name,
+					"grants",
+					role.Grants,
+				)
+				ConditionReady.Message = fmt.Sprintf(
+					"Failed to reconcile role grants: %s",
+					role.Name,
+				)
+				break
+			}
+		}
+	}
+
+	if err != nil {
+		r.logger.Error(err, ConditionReady.Message)
+		return ctrl.Result{}, err
+	}
+
+	// ok
+	ConditionReady.Status = metav1.ConditionTrue
+	ConditionReady.Message = "Successfully reconciled"
 	return ctrl.Result{}, nil
 }
 
-// finalizeMemcached will perform the required operations before delete the CR.
-func (r *RolesReconciler) doFinalizerOperationsForRoles(cr *postgresv1alpha1.Roles) {
-	// TODO(user): Add the cleanup steps that the operator
-	// needs to do before the CR can be deleted. Examples
-	// of finalizers include performing backups and deleting
-	// resources that are not owned by this CR, like a PVC.
+// // finalizeMemcached will perform the required operations before delete the CR.
+// func (r *RolesReconciler) doFinalizerOperationsForRoles(cr *postgresqlv1alpha1.Roles) {
+// 	// TODO(user): Add the cleanup steps that the operator
+// 	// needs to do before the CR can be deleted. Examples
+// 	// of finalizers include performing backups and deleting
+// 	// resources that are not owned by this CR, like a PVC.
 
-	// Note: It is not recommended to use finalizers with the purpose of deleting resources which are
-	// created and managed in the reconciliation. These ones, such as the Deployment created on this reconcile,
-	// are defined as dependent of the custom resource. See that we use the method ctrl.SetControllerReference.
-	// to set the ownerRef which means that the Deployment will be deleted by the Kubernetes API.
-	// More info: https://kubernetes.io/docs/tasks/administer-cluster/use-cascading-deletion/
+// 	// Note: It is not recommended to use finalizers with the purpose of deleting resources which are
+// 	// created and managed in the reconciliation. These ones, such as the Deployment created on this reconcile,
+// 	// are defined as dependent of the custom resource. See that we use the method ctrl.SetControllerReference.
+// 	// to set the ownerRef which means that the Deployment will be deleted by the Kubernetes API.
+// 	// More info: https://kubernetes.io/docs/tasks/administer-cluster/use-cascading-deletion/
 
-	// The following implementation will raise an event
-	r.Recorder.Event(cr, "Warning", "Deleting",
-		fmt.Sprintf("Custom Resource %s is being deleted from the namespace %s",
-			cr.Name,
-			cr.Namespace))
-}
+// 	// The following implementation will raise an event
+// 	r.Recorder.Event(cr, "Warning", "Deleting",
+// 		fmt.Sprintf("Custom Resource %s is being deleted from the namespace %s",
+// 			cr.Name,
+// 			cr.Namespace))
+// }
 
 // deploymentForMemcached returns a Memcached Deployment object
 // func (r *MemcachedReconciler) deploymentForMemcached(
@@ -433,7 +608,7 @@ func (r *RolesReconciler) doFinalizerOperationsForRoles(cr *postgresv1alpha1.Rol
 // desirable state on the cluster
 func (r *RolesReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&postgresv1alpha1.Roles{}).
+		For(&postgresqlv1alpha1.Roles{}).
 		// Owns(&appsv1.Deployment{}).
 		// WithOptions(controller.Options{MaxConcurrentReconciles: 2}).
 		Complete(r)

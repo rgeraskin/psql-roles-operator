@@ -28,19 +28,19 @@ type Grant struct {
 	// object_type, required
 	ObjectType string `json:"object_type,omitempty"`
 	// database, required
-	Database string `json:"database,omitempty"`
+	// Database string `json:"database,omitempty"`
 	// schema, default empty
 	Schema string `json:"schema,omitempty"`
 	// table, default empty
 	Table string `json:"table,omitempty"`
 	// columns, default empty
-	Columns []string `json:"columns,omitempty"`
+	// Columns []string `json:"columns,omitempty"`
 	// objects, default empty
 	Objects []string `json:"objects,omitempty"`
 	// privileges, required
 	Privileges []string `json:"privileges,omitempty"`
 	// with_grant_option, default false
-	WithGrantOption bool `json:"with_grant_option,omitempty"`
+	// WithGrantOption bool `json:"with_grant_option,omitempty"`
 }
 
 // DatabaseConnection defines a database connection configuration
@@ -52,23 +52,23 @@ type Role struct {
 	// required
 	Name string `json:"name"`
 	// description, default empty
-	Description string `json:"description"`
+	Description string `json:"description,omitempty"`
 	// can role login or can not, default true
-	Login bool `json:"login"`
+	Login bool `json:"login,omitempty"`
 	// should password be generated for user, default false
-	PasswordEnabled bool `json:"password_enabled"`
+	// PasswordEnabled bool `json:"password_enabled,omitempty"`
 	// can role initiate replication, default false
-	Replication bool `json:"replication"`
+	Replication bool `json:"replication,omitempty"`
 	// can role create databases, default false
-	CreateDatabase bool `json:"create_database"`
+	// CreateDatabase bool `json:"create_database,omitempty"`
 	// can role create other roles, default false
-	CreateRole bool `json:"create_role"`
+	// CreateRole bool `json:"create_role,omitempty"`
 	// list of roles where user is member, default empty
-	MemberOf []string `json:"member_of"`
+	MemberOf []string `json:"member_of,omitempty"`
 	// list of users that are members of role, default empty
-	Users []string `json:"users"`
+	Users []string `json:"users,omitempty"`
 	// list of grants for role, default empty
-	Grants []Grant `json:"grants"`
+	Grants []Grant `json:"grants,omitempty"`
 }
 
 // RolesSpec defines the desired state of Roles
@@ -76,7 +76,7 @@ type RolesSpec struct {
 	// Important: Run "make" to regenerate code after modifying this file
 
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
-	Database []DatabaseConnection `json:"database,omitempty"`
+	Database DatabaseConnection `json:"database,omitempty"`
 
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	Roles []Role `json:"roles,omitempty"`
@@ -113,8 +113,8 @@ type Roles struct {
 
 // RolesList contains a list of Roles
 type RolesList struct {
-	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
+	metav1.TypeMeta `        json:",inline"`
+	metav1.ListMeta `        json:"metadata,omitempty"`
 	Items           []Roles `json:"items"`
 }
 

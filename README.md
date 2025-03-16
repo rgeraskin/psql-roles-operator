@@ -1,10 +1,68 @@
-# psql-roles-operator
-// TODO(user): Add simple overview of use/purpose
+# PSQL Roles Operator
+
+Kubernetes Operator that manages PostgreSQL roles and users.
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
 
-## Getting Started
+PostgreSQL Roles Operator can:
+
+1. Create roles with optional description, login, replication.
+1. Drop roles if they dissapear from the Roles custom resource.
+1. Reconcile roles spec.
+1. Reconcile role grants, memberships.
+1. Reconcile additional users with login=true that belong to the role.
+
+More to come!
+
+**Note:** This operator is not production ready yet. It is under active development.
+
+## Usage
+
+1. Install operator
+   ```bash
+   kubectl apply -f https://raw.githubusercontent.com/rgeraskin/psql-roles-operator/v0.0.1/dist/install.yaml
+   ```
+1. Create Roles custom resource
+   ```yaml
+   apiVersion: postgresql.rgeraskin.dev/v1alpha1
+   kind: Roles
+   metadata:
+     name: roles
+   spec:
+     database:
+       connection_string: postgres://postgres:password@localhost:15432/postgres?sslmode=disable
+     roles:
+       - name: test_role
+         description: test role # optional
+         login: true # optional, default false
+         replication: false # optional, default false
+         grants: # optional, default empty so removes all grants
+           - schema: public
+             object_type: table
+             objects:
+               - table1
+               - table2
+             privileges:
+               - insert
+               - SELECT
+         member_of: # optional, default empty
+           - parent_role1
+           - parent_role2
+         users: # optional, default empty. Creates users with login=true and memberOf=<this role>
+           - user1
+           - user2
+    ```
+### Limitations
+
+Will be fixed in future releases:
+
+1. Roles password is not created by operator.
+1. Only object_type=table is supported for grants.
+1. CreateDatabase and CreateRole permissions are not supported.
+1. If role is an owner of some object, it will not be deleted.
+1. Weak schema validation.
+
+## Development
 
 ### Prerequisites
 - go version v1.22.0+
